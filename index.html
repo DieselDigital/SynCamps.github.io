@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>RDR2 Map — Locks, Search, Import/Export, Auth</title>
+<style>
+  :root{
+    --panel-bg: rgba(40,40,40,0.85);
+    --panel-border: #5a5a5a;
+    --panel-text: #e9e9e9;
+    --accent: #9ad0ff;
+  }
+  html, body { height: 100%; }
+  body { margin: 0; font-family: Arial, Helvetica, sans-serif; overflow: hidden; background:#cdb384; user-select:none; }
+  #viewport { position: relative; width: 100vw; height: 100vh; overflow: hidden; cursor: grab; }
+  #canvas { position: absolute; top:0; left:0; transform-origin: 0 0; }
+  #mapImage { display:block; pointer-events:none; }
+  .toolbar {
+    position: fixed; top: 10px; left: 10px; z-index: 1200;
+    display:flex; gap:8px; align-items:center; padding:8px 10px; flex-wrap:wrap;
+    background: var(--panel-bg); color: var(--panel-text);
+    border:1px solid var(--panel-border); border-radius:10px; box-shadow: 0 6px 16px rgba(0,0,0,.3);
+  }
+  .toolbar input[type="text"]{ padding:6px 8px; border-radius:6px; border:1px solid #666; width:260px; background:#222; color:#eee; }
+  .toolbar button{ padding:6px 10px; border-radius:8px; border:1px solid #777; background:#2c2c2c; color:#eee; cursor:pointer; }
+  .toolbar button:hover{ border-color:#aaa; }
+  #zoomLabel{ margin-left:6px; opacity:.9; }
+  .panel { position:absolute; background:var(--panel-bg); border:1px solid var(--panel-border); color:var(--panel-text); padding:10px; border-radius:10px; display:none; z-index:1300; min-width:300px; }
+  .panel h4{ margin:0 0 8px 0; font-size:14px; color:#fff; letter-spacing:.3px; }
+  .panel label{ font-size:12px; opacity:.9; display:block; margin-top:6px; }
+  .panel input, .panel select, .panel textarea{
+    width:100%; margin-top:4px; background:#222; color:#eee; border:1px solid #666; border-radius:6px; padding:6px 8px;
+  }
+  .panel textarea{ resize: vertical; min-height:66px; }
+  .panel .row{ display:flex; gap:8px; align-items:center; }
+  .panel .row > *{ flex:1; }
+  .panel .btns{ display:flex; gap:8px; justify-content:flex-end; margin-top:8px; flex-wrap:wrap; }
+  .panel .btns button{ padding:6px 10px; border-radius:8px; border:1px solid #777; background:#2c2c2c; color:#eee; cursor:pointer; }
+  .panel .btns button:hover{ border-color:#aaa; }
+  .marker{ position:absolute; width:44px; height:44px; transform: translate(-50%, -50%); cursor:pointer; opacity:.85; }
+  .marker img{ width:100%; height:100%; display:block; pointer-events:none; }
+  .marker.locked::before{
+    content:""; position:absolute; right:-2px; top:-2px; width:18px; height:18px;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,.35), rgba(0,0,0,.0) 70%);
+    border-radius: 50%; pointer-events:none;
+  }
+  .marker.locked::after{
+    content:""; position:absolute; right:0px; top:0px; width:16px; height:16px;
+    background:
+      url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23ffffff" d="M17 9h-1V7a4 4 0 10-8 0v2H7a1 1 0 00-1 1v9a1 1 0 001 1h10a1 1 0 001-1v-9a1 1 0 00-1-1zm-7-2a2 2 0 114 0v2h-4V7zm6 10H8v-7h8v7z"/></svg>')
+      no-repeat center / 16px 16px;
+    opacity:.95; filter: drop-shadow(0 1px 1px rgba(0,0,0,.5)); pointer-events:none;
+  }
+  .pulse::after{
+    content:""; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:56px; height:56px; border:2px solid var(--accent); border-radius:50%; animation:pulse 1.2s ease-out 0s 3;
+  }
+  @keyframes pulse { 0% { opacity: .9; transform: translate(-50%,-50%) scale(0.5);} 100% { opacity:0; transform: translate(-50%,-50%) scale(2.2);} }
+  #results { position: fixed; top: 60px; left: 10px; z-index: 1200; display:none; max-height: 40vh; overflow:auto;
+    background: var(--panel-bg); color: var(--panel-text); border:1px solid var(--panel-border); border-radius:8px; padding:6px; min-width:340px; }
+  #results .item{ padding:6px 8px; cursor:pointer; border-radius:6px; display:flex; justify-content:space-between; gap:10px; }
+  #results .item:hover{ background:#2b2b2b; }
+  #results .score{ opacity:.7; font-size:12px; }
+  .hint{ position: fixed; bottom: 10px; left: 10px; z-index: 1100; background:var(--panel-bg); color:var(--panel-text); border:1px solid var(--panel-border); border-radius:8px; padding:6px 8px; font-size:12px; }
+  .credit{
+    position:fixed; top:10px; right:10px; z-index:1200;
+    font-size:12px; color:rgba(255,255,255,0.6);
+    background:rgba(0,0,0,0.25); padding:3px 8px;
+    border-radius:6px; font-style:italic;
+  }
+</style>
+</head>
+<body>
+  <div class="credit">Created by Raylan Givens &amp; Lara Croft</div>
+  <div class="toolbar">
+    <input id="searchInput" type="text" placeholder="Search Name, ID, or Notes… (typos OK)" />
+    <button id="searchBtn">Search</button>
+    <label style="margin-left:6px; font-size:12px; opacity:.85;"><input type="checkbox" id="toggleCamps" checked/> Camps</label>
+    <label style="font-size:12px; opacity:.85;"><input type="checkbox" id="toggleHideouts" checked/> Hideouts</label>
+    <button id="lockAllBtn" title="Locks ALL entries (one-way)">Lock All</button>
+    <button id="resetViewBtn">Reset View</button>
+    <button id="exportBtn">Export JSON</button>
+    <button id="importBtn">Import JSON (merge)</button>
+    <input id="fileInput" type="file" accept="application/json" style="display:none"/>
+    <span id="zoomLabel">100%</span>
+  </div>
+  <div id="results"></div>
+
+  <div id="viewport">
+    <div id="canvas">
+      <img id="mapImage" src="rdr2-map.jpg" alt="RDR2 Map"/>
+    </div>
+  </div>
+
+  <div id="menu" class="panel">
+    <h4>Add Marker</h4>
+    <label>Type
+      <select id="typeSelect"><option value="camp">Camp</option><option value="hideout">Hideout</option></select>
+    </label>
+    <div class="row">
+      <label>Name <input type="text" id="markerName" placeholder="Name"/></label>
+      <label>ID <input type="text" id="markerId" placeholder="Unique ID"/></label>
+    </div>
+    <label>Notes
+      <textarea id="markerNotes" placeholder="Optional notes…"></textarea>
+    </label>
+    <div class="btns">
+      <button id="addMarkerBtn">Add</button>
+      <button id="closeMenuBtn">Cancel</button>
+    </div>
+  </div>
+
+  <div id="popup" class="panel">
+    <h4 id="popupTitle">Marker</h4>
+    <div id="popupFields">
+      <label>Name <input type="text" id="popupNameInput"/></label>
+      <div class="row">
+        <label>Type
+          <select id="popupTypeInput"><option value="camp">Camp</option><option value="hideout">Hideout</option></select>
+        </label>
+        <label>ID <input type="text" id="popupIdInput"/></label>
+      </div>
+      <label>Notes <textarea id="popupNotes"></textarea></label>
+      <div class="row" style="align-items:center;">
+        <label style="flex:unset;"><input type="checkbox" id="popupLockChk"/> Locked</label>
+      </div>
+    </div>
+    <div id="popupReadonly" style="display:none;">
+      <div><strong>Name:</strong> <span id="roName"></span></div>
+      <div><strong>Type:</strong> <span id="roType"></span></div>
+      <div><strong>ID:</strong> <span id="roId"></span></div>
+      <div><strong>Notes:</strong><br/><div id="roNotes" style="white-space:pre-wrap; opacity:.9;"></div></div>
+      <div style="margin-top:6px; opacity:.9;"><strong>Status:</strong> Locked</div>
+    </div>
+    <div class="btns">
+      <button id="unlockPopupBtn" style="display:none;">Unlock</button>
+      <button id="savePopupBtn">Save</button>
+      <button id="deletePopupBtn">Delete</button>
+      <button id="closePopupBtn">Close</button>
+    </div>
+  </div>
+
+  <div class="hint">Password protected (static). Right‑click to add. **Lock All** is one‑way (locks every entry). Each marker can be locked/unlocked individually. Import merges (ignores exact dups, skips ID conflicts). Use toggles to show/hide Camps or Hideouts.</div>
+
+<script>
+// ---- Static Password Gate (no caching, prompt every load) ----
+(function gate(){
+  const ACCESS_PASSWORD = "Marshals";
+  const entered = prompt("Enter password");
+  if(entered !== ACCESS_PASSWORD){
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#111;color:#eee;font-family:Arial;"><div style="padding:18px 22px;border:1px solid #333;border-radius:8px;background:#181818;box-shadow:0 6px 18px rgba(0,0,0,.5);">Access denied.</div></div>';
+    throw new Error("Unauthorized");
+  }
+})();
+const viewport = document.getElementById('viewport');
+const canvas = document.getElementById('canvas');
+const img = document.getElementById('mapImage');
+const menu = document.getElementById('menu');
+const popup = document.getElementById('popup');
+const resetViewBtn = document.getElementById('resetViewBtn');
+const lockAllBtn = document.getElementById('lockAllBtn');
+const zoomLabel = document.getElementById('zoomLabel');
+const resultsBox = document.getElementById('results');
+const exportBtn = document.getElementById('exportBtn');
+const importBtn = document.getElementById('importBtn');
+const fileInput = document.getElementById('fileInput');
+
+const searchInput = document.getElementById('searchInput');
+const searchBtn = document.getElementById('searchBtn');
+const toggleCamps = document.getElementById('toggleCamps');
+const toggleHideouts = document.getElementById('toggleHideouts');
+
+let markers = JSON.parse(localStorage.getItem('markers_rdr2_zoomable')) || [];
+let currentMarker = null;
+
+// Ensure lock field exists on old data
+markers = markers.map(m => ({...m, lock: !!m.lock}));
+
+// Zoom scale: 0.01–1.0
+let scale = 1, translateX = 0, translateY = 0;
+const minScale = 0.01, maxScale = 1.0;
+
+img.addEventListener('load', () => {
+  canvas.style.width = img.naturalWidth + 'px';
+  canvas.style.height = img.naturalHeight + 'px';
+  centerFit();
+  renderMarkers();
+  applyVisibilityFilters();
+});
+
+function updateTransform(){
+  canvas.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+  zoomLabel.textContent = Math.round(scale * 100) + '%';
+}
+function centerFit(){
+  const vw = viewport.clientWidth, vh = viewport.clientHeight;
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  const s = Math.min(vw/iw, vh/ih);
+  scale = s; translateX = (vw - iw*s)/2; translateY = (vh - ih*s)/2; updateTransform();
+}
+resetViewBtn.onclick = centerFit;
+
+// Pan
+let isPanning = false, panStart={x:0,y:0}, panStartT={x:0,y:0};
+function startPan(e){
+  if(e.button!==0) return;
+  if (e.target.closest('.marker') || e.target.closest('.panel')) return;
+  isPanning = true; viewport.style.cursor='grabbing';
+  panStart = {x:e.clientX, y:e.clientY}; panStartT = {x:translateX, y:translateY};
+}
+viewport.addEventListener('mousedown', startPan);
+canvas.addEventListener('mousedown', startPan);
+window.addEventListener('mousemove', (e)=>{
+  if(!isPanning) return;
+  translateX = panStartT.x + (e.clientX - panStart.x);
+  translateY = panStartT.y + (e.clientY - panStart.y);
+  updateTransform();
+});
+window.addEventListener('mouseup', ()=>{ isPanning=false; viewport.style.cursor='grab'; });
+
+// Zoom
+viewport.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = viewport.getBoundingClientRect();
+  const vx = e.clientX - rect.left, vy = e.clientY - rect.top;
+  const prev = scale;
+  const factor = (e.deltaY>0 ? 0.9 : 1.1);
+  const next = clamp(prev * factor, minScale, maxScale);
+  const cx = (vx - translateX)/prev, cy = (vy - translateY)/prev;
+  scale = next; translateX = vx - cx*next; translateY = vy - cy*next; updateTransform();
+}, {passive:false});
+
+function clamp(v,min,max){ return Math.max(min, Math.min(max,v)); }
+
+// Context menu to add
+viewport.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const {cx,cy} = screenToCanvas(e.clientX,e.clientY);
+  menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px'; menu.style.display='block';
+  menu.dataset.cx = cx; menu.dataset.cy = cy;
+});
+document.getElementById('closeMenuBtn').onclick = ()=> menu.style.display='none';
+
+// Add marker with unique ID
+document.getElementById('addMarkerBtn').onclick = () => {
+  const type = document.getElementById('typeSelect').value;
+  const name = (document.getElementById('markerName').value || '').trim();
+  const idv = (document.getElementById('markerId').value || '').trim();
+  const notes = (document.getElementById('markerNotes').value || '');
+  if(!idv){ alert('ID is required.'); return; }
+  if (markers.some(m => (m.id||'') === idv)) { alert('That ID already exists. IDs must be unique.'); return; }
+  const x = parseFloat(menu.dataset.cx), y = parseFloat(menu.dataset.cy);
+  const marker = { x, y, type, name, id: idv, notes, lock: false };
+  markers.push(marker);
+  addMarkerElement(marker);
+  saveMarkers();
+  menu.style.display='none';
+  document.getElementById('markerName').value=''; document.getElementById('markerId').value=''; document.getElementById('markerNotes').value='';
+  applyVisibilityFilters();
+};
+
+function screenToCanvas(sx,sy){
+  const rect = viewport.getBoundingClientRect();
+  const vx = sx - rect.left, vy = sy - rect.top;
+  return { cx:(vx - translateX)/scale, cy:(vy - translateY)/scale };
+}
+
+function renderMarkers(){ canvas.querySelectorAll('.marker').forEach(m=>m.remove()); markers.forEach(addMarkerElement); }
+
+function addMarkerElement(marker){
+  const el = document.createElement('div');
+  el.className = 'marker' + (marker.lock ? ' locked' : '');
+  el.style.left = marker.x + 'px';
+  el.style.top = marker.y + 'px';
+  el.dataset.type = marker.type;
+  el.dataset.name = marker.name||'';
+  el.dataset.id = marker.id||'';
+  el.dataset.notes = marker.notes||'';
+  el.dataset.lock = marker.lock ? '1' : '0';
+  const imgEl = document.createElement('img');
+  imgEl.src = marker.type === 'hideout' ? 'icon-hideout.png' : 'icon-camp.png';
+  imgEl.alt = marker.type;
+  el.appendChild(imgEl);
+
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    currentMarker = el;
+    openPopupAt(e.clientX, e.clientY);
+  });
+
+  // Drag when unlocked
+  let dragging=false, dragOff={x:0,y:0};
+  el.addEventListener('mousedown', (e)=>{
+    if(e.button!==0) return;
+    if(el.dataset.lock === '1') return; // locked -> no drag
+    e.stopPropagation();
+    dragging=true;
+    const {cx,cy} = screenToCanvas(e.clientX, e.clientY);
+    dragOff = { x: cx - marker.x, y: cy - marker.y };
+    function move(ev){
+      if(!dragging) return;
+      const {cx,cy} = screenToCanvas(ev.clientX, ev.clientY);
+      marker.x = cx - dragOff.x; marker.y = cy - dragOff.y;
+      el.style.left = marker.x + 'px'; el.style.top = marker.y + 'px';
+    }
+    function up(){
+      dragging=false; window.removeEventListener('mousemove', move); saveMarkers();
+    }
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up, { once: true });
+  });
+
+  canvas.appendChild(el);
+}
+
+function openPopupAt(px,py){
+  const fields = document.getElementById('popupFields');
+  const ro = document.getElementById('popupReadonly');
+  const nameIn = document.getElementById('popupNameInput');
+  const typeIn = document.getElementById('popupTypeInput');
+  const idIn = document.getElementById('popupIdInput');
+  const notesIn = document.getElementById('popupNotes');
+  const lockChk = document.getElementById('popupLockChk');
+  const unlockBtn = document.getElementById('unlockPopupBtn');
+  const saveBtn = document.getElementById('savePopupBtn');
+  const delBtn = document.getElementById('deletePopupBtn');
+
+  nameIn.value = currentMarker.dataset.name;
+  typeIn.value = currentMarker.dataset.type;
+  idIn.value = currentMarker.dataset.id;
+  notesIn.value = currentMarker.dataset.notes;
+  lockChk.checked = currentMarker.dataset.lock === '1';
+
+  const readOnly = lockChk.checked;
+  if(readOnly){
+    fields.style.display='none'; ro.style.display='block';
+    saveBtn.style.display='none';
+    delBtn.style.display='none';
+    unlockBtn.style.display='inline-block';
+    document.getElementById('roName').textContent = currentMarker.dataset.name || '(unnamed)';
+    document.getElementById('roType').textContent = currentMarker.dataset.type;
+    document.getElementById('roId').textContent = currentMarker.dataset.id || '(none)';
+    document.getElementById('roNotes').textContent = currentMarker.dataset.notes || '';
+  } else {
+    fields.style.display='block'; ro.style.display='none';
+    saveBtn.style.display='inline-block';
+    delBtn.style.display='inline-block';
+    unlockBtn.style.display='none';
+  }
+  popup.style.left = px + 'px'; popup.style.top = py + 'px'; popup.style.display='block';
+
+  // Unlock handler
+  unlockBtn.onclick = () => {
+    const idx = Array.from(canvas.querySelectorAll('.marker')).indexOf(currentMarker);
+    if(idx === -1) return;
+    markers[idx].lock = false;
+    currentMarker.dataset.lock = '0';
+    currentMarker.classList.remove('locked');
+    saveMarkers();
+    // Switch to editable mode
+    fields.style.display='block'; ro.style.display='none';
+    saveBtn.style.display='inline-block';
+    delBtn.style.display='inline-block';
+    unlockBtn.style.display='none';
+    document.getElementById('popupLockChk').checked = false;
+  };
+}
+
+// Save edits / lock state
+document.getElementById('savePopupBtn').onclick = () => {
+  if(!currentMarker) return;
+  const name = (document.getElementById('popupNameInput').value||'').trim();
+  const type = document.getElementById('popupTypeInput').value;
+  const idv = (document.getElementById('popupIdInput').value||'').trim();
+  const notes = (document.getElementById('popupNotes').value||'');
+  const locked = document.getElementById('popupLockChk').checked;
+
+  const currentIndex = Array.from(canvas.querySelectorAll('.marker')).indexOf(currentMarker);
+  const duplicate = markers.some((m,i)=> i!==currentIndex && (m.id||'')===idv);
+  if(!idv){ alert('ID is required.'); return; }
+  if(duplicate){ alert('That ID already exists. IDs must be unique.'); return; }
+
+  const m = markers[currentIndex];
+  m.name = name; m.type = type; m.id = idv; m.notes = notes; m.lock = locked;
+
+  currentMarker.dataset.name = name; currentMarker.dataset.type = type; currentMarker.dataset.id = idv; currentMarker.dataset.notes = notes; currentMarker.dataset.lock = locked ? '1':'0';
+  currentMarker.querySelector('img').src = type === 'hideout' ? 'icon-hideout.png' : 'icon-camp.png';
+  currentMarker.classList.toggle('locked', locked);
+
+  saveMarkers();
+  popup.style.display = 'none';
+};
+
+document.getElementById('deletePopupBtn').onclick = () => {
+  if(!currentMarker) return;
+  const idx = Array.from(canvas.querySelectorAll('.marker')).indexOf(currentMarker);
+  if(idx>-1) markers.splice(idx,1);
+  currentMarker.remove(); saveMarkers(); popup.style.display='none';
+};
+document.getElementById('closePopupBtn').onclick = () => popup.style.display='none';
+
+// Lock All (one-way): force DOM + data to locked
+lockAllBtn.onclick = () => {
+  canvas.querySelectorAll('.marker').forEach(el => {
+    el.dataset.lock = '1';
+    el.classList.add('locked');
+  });
+  saveMarkers();
+};
+
+function saveMarkers(){
+  const list = [];
+  canvas.querySelectorAll('.marker').forEach(el => {
+    list.push({
+      x: parseFloat(el.style.left),
+      y: parseFloat(el.style.top),
+      type: el.dataset.type,
+      name: el.dataset.name,
+      id: el.dataset.id,
+      notes: el.dataset.notes,
+      lock: el.dataset.lock === '1'
+    });
+  });
+  markers = list;
+  localStorage.setItem('markers_rdr2_zoomable', JSON.stringify(markers));
+  applyVisibilityFilters();
+}
+
+// -------- Import / Export (MERGE) --------
+exportBtn.onclick = () => {
+  const payload = {
+    version: 5,
+    exportedAt: new Date().toISOString(),
+    markers
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'rdr2-markers.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 1000);
+};
+
+importBtn.onclick = () => fileInput.click();
+fileInput.onchange = async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  try{
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const imported = Array.isArray(data) ? data : (Array.isArray(data.markers) ? data.markers : []);
+    if(!imported.length) throw new Error('Invalid file format');
+
+    // Build lookups
+    const existingById = new Map();
+    const existingSet = new Set();
+    markers.forEach(m => {
+      existingById.set(m.id, m);
+      existingSet.add(JSON.stringify({x:+m.x, y:+m.y, type:m.type, name:m.name||'', id:m.id, notes:m.notes||'', lock:!!m.lock}));
+    });
+
+    let added = 0, dupExact = 0, idConflicts = 0;
+
+    for(const m of imported){
+      const norm = {
+        x: +m.x || 0,
+        y: +m.y || 0,
+        type: m.type==='hideout' ? 'hideout' : 'camp',
+        name: m.name || '',
+        id: m.id,
+        notes: m.notes || '',
+        lock: !!m.lock
+      };
+      if(!norm.id){ continue; } // skip if no ID
+      const key = JSON.stringify(norm);
+      if(existingSet.has(key)){
+        dupExact++; // perfect duplicate, ignore
+        continue;
+      }
+      if(existingById.has(norm.id)){
+        // same ID but different data -> skip
+        idConflicts++;
+        continue;
+      }
+      // Accept new
+      markers.push(norm);
+      existingById.set(norm.id, norm);
+      existingSet.add(key);
+      added++;
+    }
+
+    localStorage.setItem('markers_rdr2_zoomable', JSON.stringify(markers));
+    renderMarkers();
+    applyVisibilityFilters();
+
+    alert(`Import merged. Added: ${added}. Ignored exact duplicates: ${dupExact}. Skipped ID conflicts: ${idConflicts}.`);
+  }catch(err){
+    alert('Import failed: '+err.message);
+  }finally{
+    fileInput.value = '';
+  }
+};
+
+// -------- Fuzzy Search (Name/ID/Notes) --------
+function norm(s){ return (s||'').toString().toLowerCase().trim(); }
+function levenshtein(a,b){
+  a = norm(a); b = norm(b);
+  const m = Array(b.length+1).fill(0).map((_,i)=>[i]);
+  for(let j=0;j<=a.length;j++){ m[0][j]=j; }
+  for(let i=1;i<=b.length;i++){
+    for(let j=1;j<=a.length;j++){
+      const cost = a[j-1]===b[i-1] ? 0 : 1;
+      m[i][j] = Math.min(
+        m[i-1][j] + 1,
+        m[i][j-1] + 1,
+        m[i-1][j-1] + cost
+      );
+    }
+  }
+  return m[b.length][a.length];
+}
+function fieldScore(q, field){
+  const f = norm(field), query = norm(q);
+  if(!f) return 9999;
+  if(f.includes(query)) return 0;
+  const len = Math.max(3, Math.min(query.length, 20));
+  let best = 9999;
+  for(let i=0;i<=f.length-len;i++){
+    const seg = f.substr(i,len);
+    best = Math.min(best, levenshtein(query, seg));
+  }
+  return best;
+}
+function scoreMarker(q, el){
+  const s1 = fieldScore(q, el.dataset.name);
+  const s2 = fieldScore(q, el.dataset.id);
+  const s3 = fieldScore(q, el.dataset.notes);
+  return Math.min(s1,s2,s3);
+}
+function highlight(el){
+  el.classList.add('pulse');
+  setTimeout(()=> el.classList.remove('pulse'), 1400);
+}
+function focusOnMarker(el){
+  const rect = viewport.getBoundingClientRect();
+  const cx = parseFloat(el.style.left), cy = parseFloat(el.style.top);
+  const targetScale = Math.max(scale, 0.5);
+  const vx = rect.width/2, vy = rect.height/2;
+  const newTranslateX = vx - cx * targetScale;
+  const newTranslateY = vy - cy * targetScale;
+  scale = clamp(targetScale, minScale, maxScale);
+  translateX = newTranslateX; translateY = newTranslateY;
+  updateTransform();
+  highlight(el);
+}
+
+searchBtn.onclick = doSearch;
+searchInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
+function doSearch(){
+  const q = searchInput.value;
+  const list = Array.from(canvas.querySelectorAll('.marker')).map(el=>({ el, score: scoreMarker(q, el) }));
+  list.sort((a,b)=>a.score-b.score);
+  const top = list.filter(x=>x.score < 6);
+  if(top.length===0){
+    resultsBox.style.display='block';
+    resultsBox.innerHTML = '<div class="item"><span>No good matches.</span></div>';
+    return;
+  }
+  if(top.length===1 && top[0].score===0){
+    resultsBox.style.display='none';
+    focusOnMarker(top[0].el);
+    const r = viewport.getBoundingClientRect(); currentMarker = top[0].el;
+    openPopupAt(r.left + r.width/2, r.top + r.height/2);
+    return;
+  }
+  resultsBox.innerHTML = '';
+  top.slice(0,12).forEach(item=>{
+    const el = item.el;
+    const row = document.createElement('div');
+    row.className = 'item';
+    row.innerHTML = `<span>${el.dataset.type.toUpperCase()} — ${el.dataset.name||'(unnamed)'} [${el.dataset.id||'no-id'}]</span><span class="score">score ${item.score}</span>`;
+    row.onclick = ()=>{ resultsBox.style.display='none'; focusOnMarker(el); const r=viewport.getBoundingClientRect(); currentMarker=el; openPopupAt(r.left+r.width/2, r.top+r.height/2); };
+    resultsBox.appendChild(row);
+  });
+  resultsBox.style.display='block';
+}
+
+// Visibility toggles
+function applyVisibilityFilters(){
+  const showCamps = toggleCamps.checked;
+  const showHideouts = toggleHideouts.checked;
+  canvas.querySelectorAll('.marker').forEach(el => {
+    const t = el.dataset.type;
+    const visible = (t === 'camp' ? showCamps : showHideouts);
+    el.style.display = visible ? '' : 'none';
+  });
+}
+toggleCamps.addEventListener('change', applyVisibilityFilters);
+toggleHideouts.addEventListener('change', applyVisibilityFilters);
+
+// Close panels on background click
+viewport.addEventListener('click', ()=>{ menu.style.display='none'; popup.style.display='none'; resultsBox.style.display='none'; });
+
+</script>
+</body>
+</html>
